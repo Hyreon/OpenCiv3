@@ -1,8 +1,74 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using QueryCiv3;
+using QueryCiv3.Sav;
+using QueryCiv3.Biq;
 
 internal class QueryCiv3Head {
+
+	private static readonly Dictionary<string, Type> biq_header_map = new Dictionary<string, Type> {
+		{ "RULE", typeof(RULE) },
+		{ "BLDG", typeof(BLDG) },
+		{ "CITY", typeof(QueryCiv3.Biq.CITY) },
+		{ "CLNY", typeof(QueryCiv3.Biq.CLNY) },
+		{ "CONT", typeof(QueryCiv3.Biq.CONT) },
+		{ "CTZN", typeof(QueryCiv3.Biq.CTZN) },
+		{ "CULT", typeof(QueryCiv3.Biq.CULT) },
+		{ "DIFF", typeof(DIFF) },
+		{ "ERAS", typeof(ERAS) },
+		{ "ESPN", typeof(QueryCiv3.Biq.ESPN) },
+		{ "EXPR", typeof(EXPR) },
+		{ "FLAV", typeof(FLAV) },
+		{ "GAME", typeof(QueryCiv3.Biq.GAME) },
+		{ "GOOD", typeof(GOOD) },
+		{ "GOVT", typeof(GOVT) },
+		{ "LEAD", typeof(QueryCiv3.Biq.LEAD) },
+		{ "PRTO", typeof(PRTO) },
+		{ "RACE", typeof(RACE) },
+		{ "SLOC", typeof(SLOC) },
+		{ "TECH", typeof(TECH) },
+		{ "TERR", typeof(TERR) },
+		{ "TFRM", typeof(TFRM) },
+		{ "TILE", typeof(QueryCiv3.Biq.TILE) },
+		{ "UNIT", typeof(QueryCiv3.Biq.UNIT) },
+		{ "WCHR", typeof(WCHR) },
+		{ "WMAP", typeof(WMAP) },
+		{ "WSIZ", typeof(WSIZ) },
+	};
+
+	private static readonly Dictionary<string, Type> sav_header_map = new Dictionary<string, Type> {
+		{ "GAME", typeof(QueryCiv3.Sav.GAME) },
+		{ "AIBS", typeof(AIBS) },
+		{ "BINF", typeof(BINF) },
+		{ "BITM", typeof(BITM) },
+		{ "CITY", typeof(QueryCiv3.Sav.CITY) },
+		{ "CLNY", typeof(QueryCiv3.Sav.CLNY) },
+		{ "CONT", typeof(QueryCiv3.Sav.CONT) },
+		{ "CTPG", typeof(CTPG) },
+		{ "CTZN", typeof(QueryCiv3.Sav.CTZN) },
+		{ "DATE", typeof(DATE) },
+		{ "FAXX", typeof(FAXX) },
+		{ "HIST", typeof(HIST) },
+		{ "IDLS", typeof(IDLS) },
+		{ "LEAD", typeof(QueryCiv3.Sav.LEAD) },
+		{ "OUTP", typeof(OUTP) },
+		{ "PALV", typeof(PALV) },
+		{ "PEER", typeof(PEER) },
+		{ "PLGI", typeof(PLGI) },
+		{ "POPD", typeof(POPD) },
+		{ "RADT", typeof(RADT) },
+		{ "RPLE", typeof(RPLE) },
+		{ "RPLT", typeof(RPLT) },
+		{ "TILE", typeof(QueryCiv3.Sav.TILE) },
+		{ "TUTR", typeof(TUTR) },
+		{ "UNIT", typeof(QueryCiv3.Sav.UNIT) },
+		{ "VLOC", typeof(VLOC) },
+		{ "WRLD", typeof(WRLD) },
+	};
+
 	private static int Main(string[] args) {
 
 		//Some examples...
@@ -34,6 +100,7 @@ internal class QueryCiv3Head {
 			Description = "The sections of the file that should be considered",
 			AllowMultipleArgumentsPerToken = true,
 		};
+
 		/*
 		 * Some notes on sections:
 		 * CIV3 differs by noise/time. Playing the exact turn twice will change this section.
@@ -78,6 +145,11 @@ internal class QueryCiv3Head {
 			}
 		};
 
+		//Option<byte> patchStartOption = new("--start")
+		//{
+		//	Description = "The byte to start from"
+		//};
+
 		Option<byte> patchValueOption = new("--value")
 		{
 			Description = "The new value of the byte"
@@ -112,6 +184,22 @@ internal class QueryCiv3Head {
 
 		summaryCommand.SetAction(parseResult => OutputSummary(parseResult.GetValue(fileOption), parseResult.GetValue(outputFileOption)?.FullName));
 
+		// DECRYPT COMMAND
+		Command catCommand = new("cat", "Create a copycat of the provided file")
+		{
+			fileOption,
+			outputFileOption
+		};
+		rootCommand.Subcommands.Add(catCommand);
+
+		catCommand.SetAction(parseResult => {
+
+			Civ3File file = parseResult.GetValue(fileOption);
+			using FileStream stream = File.Create(parseResult.GetValue(outputFileOption)?.FullName);
+			stream.Write(file.GetBytes(0, file.Length));
+
+		});
+
 		// PATCH BYTE COMMAND
 		Command patchByteCommand = new("patchByte", "Patch a specific byte in the file")
 		{
@@ -139,6 +227,60 @@ internal class QueryCiv3Head {
 			}
 		});
 
+		//READ COMMAND
+		Command readCommand = new("read", "Read all sections matching criteria")
+		{
+			fileOption,
+			sectionNamesOption,
+			sectionBlacklistOption,
+			outputFileOption
+		};
+		rootCommand.Subcommands.Add(readCommand);
+
+		readCommand.SetAction(parseResult => {
+			Civ3File file = parseResult.GetValue(fileOption)!;
+			List<string> sectionNames = parseResult.GetValue(sectionNamesOption)!;
+
+			string? filename = parseResult.GetValue(outputFileOption)?.FullName;
+			using StreamWriter streamWriter = GetFileOrConsoleWriter(filename);
+			if (sectionNames.Count == 0 || parseResult.GetValue(sectionBlacklistOption)) {
+
+				WorkAllSectionsExclusive(file, sectionNames,
+					(i, bytesFound) => {
+						string name = file.Sections[i].Name;
+						if (!TryGetHeader(name, out Type? type)) {
+							streamWriter.WriteLine($"{i} ({name}): not a valid section");
+							return;
+						}
+						dynamic sectionData = ReadSection(type, bytesFound);
+						streamWriter.WriteLine($"{i} ({name}):");
+						foreach (FieldInfo field in type.GetFields(BindingFlags.Public | BindingFlags.Instance)) {
+							streamWriter.WriteLine($"{field.Name} = {field.GetValue(sectionData)}");
+						}
+						foreach (PropertyInfo prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance)) {
+							streamWriter.WriteLine($"[{prop.Name}] = {prop.GetValue(sectionData)}");
+						}
+					});
+			} else {
+				foreach (string header in sectionNames) {
+					WorkAllSectionsOfHeader(file, header,
+						(i, sectionCount, bytesFound) => {
+							string name = file.Sections[i].Name;
+							if (!TryGetHeader(name, out Type? type)) {
+								streamWriter.WriteLine($"{i} ({name}): not a valid section");
+								return;
+							}
+							dynamic sectionData = ReadSection(type, bytesFound);
+
+							streamWriter.WriteLine($"{i} ({name}):");
+							foreach (FieldInfo field in type.GetFields(BindingFlags.Public | BindingFlags.Instance)) {
+								streamWriter.WriteLine($"{field.Name} = {field.GetValue(sectionData)}");
+							}
+						});
+				}
+			}
+		});
+
 		//DUMP COMMAND
 		Command dumpCommand = new("dump", "Produce a hex dump of all sections matching criteria")
 		{
@@ -155,10 +297,22 @@ internal class QueryCiv3Head {
 			if (sectionNames.Count == 0 || parseResult.GetValue(sectionBlacklistOption)) {
 
 				using StreamWriter streamWriter = GetFileOrConsoleWriter(parseResult.GetValue(outputFileOption)?.FullName);
-				DumpAllSectionsExclusive(streamWriter, file, sectionNames);
+				WorkAllSectionsExclusive(file, sectionNames,
+					(i, bytesFound) => {
+						string name = file.Sections[i].Name;
+						streamWriter.WriteLine($"{i} ({name}): {ByteArrayAsString(bytesFound)}");
+					});
 			} else {
 				foreach (string header in sectionNames) {
-					DumpAllSectionsOfHeader(parseResult.GetValue(outputFileOption)?.FullName, file, header);
+					WorkAllSectionsOfHeader(file, header,
+						(i, sectionCount, bytesFound) => {
+							string? filename = parseResult.GetValue(outputFileOption)?.FullName;
+							if (filename != null) {
+								File.WriteAllBytes(filename + " " + header + " " + sectionCount + ".bin", bytesFound);
+							} else {
+								Console.WriteLine($"{header} {sectionCount}: {ByteArrayAsString(bytesFound)}");
+							}
+						});
 				}
 			}
 		});
@@ -188,7 +342,7 @@ internal class QueryCiv3Head {
 				referenceFile,
 				parseResult.GetValue(sectionNamesOption),
 				parseResult.GetValue(sectionBlacklistOption), (bi, ri) => {
-					streamWriter.WriteLine("{0} differs", file.Sections[bi].Name);
+					streamWriter.WriteLine("{0} ({1}) differs", file.Sections[bi].Name, bi);
 
 					if (showDifference) {
 						byte[] content = file.GetRegion(bi);
@@ -231,6 +385,23 @@ internal class QueryCiv3Head {
 
 		return rootCommand.Parse(args).Invoke();
 
+	}
+
+	//FIXME get the correct header type between headers contained in both the BIQ and SAV portions
+	private static bool TryGetHeader(string name, out Type? type) {
+		if (!sav_header_map.TryGetValue(name, out type)) {
+			return biq_header_map.TryGetValue(name, out type);
+		} else return true;
+	}
+
+	private static dynamic ReadSection(Type t, byte[] data) {
+		GCHandle handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+		try {
+			IntPtr ptr = handle.AddrOfPinnedObject();
+			return Marshal.PtrToStructure(ptr, t);
+		} finally {
+			handle.Free();
+		}
 	}
 
 	static Civ3File? Civ3FileParser(ArgumentResult result) {
@@ -308,21 +479,21 @@ internal class QueryCiv3Head {
 	}
 
 	private static string ByteArrayAsString(byte[] array) {
-		return BitConverter.ToString(array);
+		return System.Text.Encoding.Default.GetString(array);
 	}
 
-	private static void DumpAllSectionsExclusive(StreamWriter streamWriter, Civ3File file, List<string> sectionNames) {
+	private static void WorkAllSectionsExclusive(Civ3File file, List<string> sectionNames, Action<int, byte[]> task) {
 		for (int i = 0; i < file.Sections.Length; i++) {
 			Civ3Section section = file.Sections[i];
 			if (sectionNames.Contains(section.Name)) {
 				continue;
 			}
 			byte[] bytesFound = file.GetRegion(i);
-			streamWriter.WriteLine($"{i} ({section.Name}): {ByteArrayAsString(bytesFound)}");
+			task(i, bytesFound);
 		}
 	}
 
-	private static void DumpAllSectionsOfHeader(string? filename, Civ3File file, string header) {
+	private static void WorkAllSectionsOfHeader(Civ3File file, string header, Action<int, int, byte[]> task) {
 		int sectionCount = 0;
 		while (true) {
 			int index = GetSectionIndexOfType(file, header, sectionCount);
@@ -330,11 +501,7 @@ internal class QueryCiv3Head {
 				break;
 			} else {
 				byte[] bytesFound = file.GetRegion(index);
-				if (filename != null) {
-					File.WriteAllBytes(filename + " " + header + " " + sectionCount + ".bin", bytesFound);
-				} else {
-					Console.WriteLine($"{header} {sectionCount}: {ByteArrayAsString(bytesFound)}");
-				}
+				task(index, sectionCount, bytesFound);
 				sectionCount++;
 			}
 		}

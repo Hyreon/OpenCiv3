@@ -100,7 +100,7 @@ namespace QueryCiv3 {
 			} else {
 				ending = Sections[index + 1].Offset - Sections[index].Offset;
 			}
-			return GetBytes(Sections[index].Offset, ending);
+			return GetBytes(Sections[index].Offset + 4, ending);
 		}
 		// NOTE: Tried to parameterize encoding with default of Civ3StringEncoding, but default must be compile-time constant
 		public string GetString(int offset, int length) {
